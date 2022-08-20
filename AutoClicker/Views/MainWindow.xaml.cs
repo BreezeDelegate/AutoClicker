@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Timers;
 using System.Windows;
+using System.Windows.Forms;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -9,11 +10,11 @@ using AutoClicker.Enums;
 using AutoClicker.Models;
 using AutoClicker.Utils;
 using Serilog;
+using Application = System.Windows.Application;
 using MouseAction = AutoClicker.Enums.MouseAction;
 using MouseButton = AutoClicker.Enums.MouseButton;
 using MouseCursor = System.Windows.Forms.Cursor;
 using NotifyIcon = System.Windows.Forms.NotifyIcon;
-
 using Point = System.Drawing.Point;
 using Timer = System.Timers.Timer;
 
@@ -30,6 +31,16 @@ namespace AutoClicker.Views
         public static readonly DependencyProperty CurrentSettingsProperty =
            DependencyProperty.Register(nameof(AutoClickerSettings), typeof(AutoClickerSettings), typeof(MainWindow),
                new UIPropertyMetadata(SettingsUtils.CurrentSettings.AutoClickerSettings));
+
+        public Screen[] AllScreens
+        {
+            get { return (Screen[])GetValue(AllScreensProperty); }
+            set { SetValue(AllScreensProperty, value); }
+        }
+
+        public static readonly DependencyProperty AllScreensProperty =
+           DependencyProperty.Register(nameof(AllScreens), typeof(Screen[]), typeof(MainWindow),
+               new UIPropertyMetadata(Screen.AllScreens));
 
         private int timesRepeated = 0;
         private readonly Timer clickTimer;
@@ -85,6 +96,12 @@ namespace AutoClicker.Views
             _defaultIcon = Icon;
 
             InitializeSystemTrayMenu();
+
+            foreach (Screen screen in AllScreens)
+            {
+                Log.Information(screen.ToString());
+                Log.Information(screen.Bounds.Size.ToString());
+            }
         }
 
         protected override void OnClosed(EventArgs e)
