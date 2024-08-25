@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Timers;
 using System.Windows;
+using System.Windows.Forms;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -11,6 +12,7 @@ using AutoClicker.Enums;
 using AutoClicker.Models;
 using AutoClicker.Utils;
 using Serilog;
+using Application = System.Windows.Application;
 using CheckBox = System.Windows.Controls.CheckBox;
 using MouseAction = AutoClicker.Enums.MouseAction;
 using MouseButton = AutoClicker.Enums.MouseButton;
@@ -32,6 +34,16 @@ namespace AutoClicker.Views
         public static readonly DependencyProperty CurrentSettingsProperty =
            DependencyProperty.Register(nameof(AutoClickerSettings), typeof(AutoClickerSettings), typeof(MainWindow),
                new UIPropertyMetadata(SettingsUtils.CurrentSettings.AutoClickerSettings));
+
+        public Screen[] AllScreens
+        {
+            get { return (Screen[])GetValue(AllScreensProperty); }
+            set { SetValue(AllScreensProperty, value); }
+        }
+
+        public static readonly DependencyProperty AllScreensProperty =
+            DependencyProperty.Register(nameof(AllScreens), typeof(Screen[]), typeof(MainWindow),
+                new UIPropertyMetadata(Screen.AllScreens));
 
         private int timesRepeated = 0;
         private readonly Timer clickTimer;
@@ -90,6 +102,12 @@ namespace AutoClicker.Views
             RadioButtonSelectedLocationMode_CurrentLocation.Checked += RadioButtonSelectedLocationMode_CurrentLocationOnChecked;
 
             InitializeSystemTrayMenu();
+
+            foreach (Screen screen in AllScreens)
+            {
+                Log.Information(screen.ToString());
+                Log.Information(screen.Bounds.ToString());
+            }
         }
 
         protected override void OnClosed(EventArgs e)
