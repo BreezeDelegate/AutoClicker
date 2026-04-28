@@ -301,7 +301,7 @@ namespace AutoClicker.Views
                 Text = Constants.MAIN_WINDOW_TITLE_DEFAULT
             };
             systemTrayIcon.Click += SystemTrayIcon_Click;
-
+            systemTrayIcon.DoubleClick += SystemTrayIcon_DoubleClick;
             systemTrayMenu = new SystemTrayMenu();
             systemTrayMenu.SystemTrayMenuActionEvent += SystemTrayMenu_SystemTrayMenuActionEvent;
         }
@@ -309,6 +309,7 @@ namespace AutoClicker.Views
         private void DisposeSystemTrayMenu()
         {
             systemTrayIcon.Click -= SystemTrayIcon_Click;
+            systemTrayIcon.DoubleClick -= SystemTrayIcon_DoubleClick;
             systemTrayIcon.Dispose();
 
             systemTrayMenu.SystemTrayMenuActionEvent -= SystemTrayMenu_SystemTrayMenuActionEvent;
@@ -449,6 +450,11 @@ namespace AutoClicker.Views
         {
             systemTrayMenu.IsOpen = true;
             systemTrayMenu.Focus();
+        }
+
+        private void SystemTrayIcon_DoubleClick(object sender, EventArgs e)
+        {
+            Show();
         }
 
         private void SystemTrayMenu_SystemTrayMenuActionEvent(object sender, SystemTrayMenuActionEventArgs e)
