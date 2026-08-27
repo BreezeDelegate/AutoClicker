@@ -1,6 +1,6 @@
 ﻿using System;
 using System.IO;
-using AutoClicker.Enums;
+using AutoClicker.Core.Storage;
 using AutoClicker.Models;
 using Serilog;
 
@@ -8,12 +8,15 @@ namespace AutoClicker.Utils
 {
     public static class SettingsUtils
     {
-        private static readonly string settingsFilePath =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Constants.SETTINGS_FILE_PATH);
-        private static readonly string logFilePath =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Constants.LOG_FILE_PATH);
+        private static readonly string dataDirectory = DataDirectoryResolver.Resolve(
+            AppContext.BaseDirectory,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AutoClicker"));
+        private static readonly string settingsFilePath = Path.Combine(dataDirectory, Constants.SETTINGS_FILE_PATH);
+        private static readonly string logFilePath = Path.Combine(dataDirectory, Constants.LOG_FILE_PATH);
 
         public static ApplicationSettings CurrentSettings { get; set; }
+
+        public static string DataDirectory => dataDirectory;
 
         static SettingsUtils()
         {
@@ -28,59 +31,21 @@ namespace AutoClicker.Utils
             LoadSettingsFromFile();
         }
 
-        public static void SetStartHotkey(KeyMapping key)
-        {
-            CurrentSettings.HotkeySettings.StartHotkey = key;
-            NotifyChanges(CurrentSettings.HotkeySettings.StartHotkey, Operation.Start);
-        }
-
-        public static void SetStopHotkey(KeyMapping key)
-        {
-            CurrentSettings.HotkeySettings.StopHotkey = key;
-            NotifyChanges(CurrentSettings.HotkeySettings.StopHotkey, Operation.Stop);
-        }
-
-        public static void SetToggleHotkey(KeyMapping key)
-        {
-            CurrentSettings.HotkeySettings.ToggleHotkey = key;
-            NotifyChanges(CurrentSettings.HotkeySettings.ToggleHotkey, Operation.Toggle);
-        }
-
-        public static void SetIncludeModifiers(bool includeModifiers)
-        {
-            CurrentSettings.HotkeySettings.IncludeModifiers = includeModifiers;
-            NotifyChanges(CurrentSettings.HotkeySettings.StartHotkey, Operation.Start);
-            NotifyChanges(CurrentSettings.HotkeySettings.StopHotkey, Operation.Stop);
-            NotifyChanges(CurrentSettings.HotkeySettings.ToggleHotkey, Operation.Toggle);
-        }
-
-        public static void Reset()
-        {
-            Log.Information("Reset hotkey settings to default");
-            SetStartHotkey(HotkeySettings.defaultStartKeyMapping);
-            SetStopHotkey(HotkeySettings.defaultStopKeyMapping);
-            SetToggleHotkey(HotkeySettings.defaultToggleKeyMapping);
-            SetIncludeModifiers(HotkeySettings.defaultIncludeModifiers);
-        }
-
-        private static void NotifyChanges(KeyMapping hotkey, Operation operation)
-        {
-            HotkeyChangedEventArgs args = new HotkeyChangedEventArgs
-            {
-                Hotkey = hotkey,
-                Operation = operation,
-                IncludeModifiers = CurrentSettings.HotkeySettings.IncludeModifiers
-            };
-            HotkeyChangedEvent.Invoke(null, args);
-
-            SaveSettingsToFile();
-        }
-
-        public static event EventHandler<HotkeyChangedEventArgs> HotkeyChangedEvent;
 
         private static void SaveSettingsToFile()
         {
-            JsonUtils.WriteJson(settingsFilePath, CurrentSettings);
+            try
+            {
+                JsonUtils.WriteJson(settingsFilePath, CurrentSettings);
+            }
+            catch (IOException ex)
+            {
+                Log.Error(ex, "Could not save settings to {SettingsFile}", settingsFilePath);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Log.Error(ex, "Could not save settings to {SettingsFile}", settingsFilePath);
+            }
         }
 
         public static void LoadSettingsFromFile()
@@ -96,12 +61,22 @@ namespace AutoClicker.Utils
             }
         }
 
+        public static void SetHotkeySettings(HotkeySettings settings)
+        {
+            CurrentSettings.HotkeySettings.StartHotkey = settings.StartHotkey;
+            CurrentSettings.HotkeySettings.StopHotkey = settings.StopHotkey;
+            CurrentSettings.HotkeySettings.ToggleHotkey = settings.ToggleHotkey;
+            CurrentSettings.HotkeySettings.IncludeModifiers = settings.IncludeModifiers;
+            SaveSettingsToFile();
+        }
+
         public static void SetApplicationSettings(AutoClickerSettings settings)
         {
             CurrentSettings.AutoClickerSettings.Milliseconds = settings.Milliseconds;
             CurrentSettings.AutoClickerSettings.Seconds = settings.Seconds;
             CurrentSettings.AutoClickerSettings.Minutes = settings.Minutes;
             CurrentSettings.AutoClickerSettings.Hours = settings.Hours;
+            CurrentSettings.AutoClickerSettings.VarianceMilliseconds = settings.VarianceMilliseconds;
 
             CurrentSettings.AutoClickerSettings.PickedXValue = settings.PickedXValue;
             CurrentSettings.AutoClickerSettings.PickedYValue = settings.PickedYValue;

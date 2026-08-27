@@ -26,12 +26,6 @@ namespace AutoClicker.Utils
         public const string SETTINGS_FILE_PATH = "AutoClicker_Settings.json";
         public const string LOG_FILE_PATH = "AutoClicker_Logs.txt";
 
-        public const int MOUSEEVENTF_LEFTDOWN = 0x02;
-        public const int MOUSEEVENTF_LEFTUP = 0x04;
-        public const int MOUSEEVENTF_RIGHTDOWN = 0x08;
-        public const int MOUSEEVENTF_RIGHTUP = 0x10;
-        public const int MOUSEEVENTF_MIDDLEDOWN = 0x0020;
-        public const int MOUSEEVENTF_MIDDLEUP = 0x0040;
 
         public const int MOD_NONE = 0x0;
         public const int MOD_ALT = 0x0001;

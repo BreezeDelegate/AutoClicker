@@ -13,7 +13,12 @@ namespace AutoClicker.Utils
             => assembly.GetName();
 
         public static Icon GetApplicationIcon()
-            => Icon.ExtractAssociatedIcon(assembly.Location);
+        {
+            string executablePath = Environment.ProcessPath;
+            return string.IsNullOrEmpty(executablePath)
+                ? SystemIcons.Application
+                : Icon.ExtractAssociatedIcon(executablePath) ?? SystemIcons.Application;
+        }
 
         public static Uri GetProjectUri()
             => new(assembly.GetCustomAttribute<AssemblyMetadataAttribute>().Value);

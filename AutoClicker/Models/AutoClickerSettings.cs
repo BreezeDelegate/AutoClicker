@@ -12,6 +12,8 @@ namespace AutoClicker.Models
 
         public int Milliseconds { get; set; }
 
+        public int VarianceMilliseconds { get; set; }
+
         public MouseButton SelectedMouseButton { get; set; }
 
         public MouseAction SelectedMouseAction { get; set; }

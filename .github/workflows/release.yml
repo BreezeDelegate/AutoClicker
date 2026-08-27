@@ -1,0 +1,42 @@
+name: Release Candidate Artifact
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Locked restore
+        run: dotnet restore AutoClicker/AutoClicker.sln --locked-mode
+      - name: Tests
+        run: dotnet test AutoClicker.Tests/AutoClicker.Tests.csproj -c Release --no-restore
+      - name: Publish portable win-x64
+        run: dotnet publish AutoClicker/AutoClicker.csproj -c Release --no-restore -o publish
+      - name: Package and hash
+        shell: pwsh
+        run: ./scripts/package-release.ps1 -PublishDirectory publish -OutputDirectory artifacts
+      - name: Startup smoke
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "publish/AutoClicker.exe"
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 3
+          if ($process.HasExited) { throw "AutoClicker exited during startup smoke with code $($process.ExitCode)" }
+          Stop-Process -Id $process.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: |
+            artifacts/AutoClicker-Portable-win-x64.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error

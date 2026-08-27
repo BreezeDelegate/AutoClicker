@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Input;
+using AutoClicker.Core.Hotkeys;
 using AutoClicker.Models;
 using AutoClicker.Utils;
 using Serilog;
@@ -74,32 +75,49 @@ namespace AutoClicker.Views
 
         private void SaveCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
-            if (SelectedStartKey != SettingsUtils.CurrentSettings.HotkeySettings.StartHotkey)
+            HotkeySettings proposed = new HotkeySettings
             {
-                SettingsUtils.SetStartHotkey(SelectedStartKey);
-            }
-            if (SelectedStopKey != SettingsUtils.CurrentSettings.HotkeySettings.StopHotkey)
+                StartHotkey = SelectedStartKey,
+                StopHotkey = SelectedStopKey,
+                ToggleHotkey = SelectedToggleKey,
+                IncludeModifiers = IncludeModifiers
+            };
+
+            IReadOnlyList<HotkeyConflict> conflicts = HotkeyBindingValidator.Validate(
+                new HotkeyBinding("Start", proposed.StartHotkey.VirtualKeyCode),
+                new HotkeyBinding("Stop", proposed.StopHotkey.VirtualKeyCode),
+                new HotkeyBinding("Toggle", proposed.ToggleHotkey.VirtualKeyCode));
+            if (conflicts.Count > 0)
             {
-                SettingsUtils.SetStopHotkey(SelectedStopKey);
+                HotkeyConflict conflict = conflicts[0];
+                MessageBox.Show(this, $"{conflict.FirstOperation} and {conflict.SecondOperation} cannot use the same global hotkey.",
+                    "Hotkey conflict", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
-            if (SelectedToggleKey != SettingsUtils.CurrentSettings.HotkeySettings.ToggleHotkey)
+
+            if (Owner is not MainWindow mainWindow)
             {
-                SettingsUtils.SetToggleHotkey(SelectedToggleKey);
+                MessageBox.Show(this, "The main AutoClicker window is unavailable; hotkeys were not changed.",
+                    "Hotkey unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
-            if (IncludeModifiers != SettingsUtils.CurrentSettings.HotkeySettings.IncludeModifiers)
+
+            if (!mainWindow.TryApplyHotkeySettings(proposed, out string errorMessage))
             {
-                SettingsUtils.SetIncludeModifiers(IncludeModifiers);
+                MessageBox.Show(this, errorMessage, "Hotkey unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
             }
+
+            SettingsUtils.SetHotkeySettings(proposed);
             Close();
         }
 
         private void ResetCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
-            SettingsUtils.Reset();
-            SelectedStartKey = SettingsUtils.CurrentSettings.HotkeySettings.StartHotkey;
-            SelectedStopKey = SettingsUtils.CurrentSettings.HotkeySettings.StopHotkey;
-            SelectedToggleKey = SettingsUtils.CurrentSettings.HotkeySettings.ToggleHotkey;
-            IncludeModifiers = SettingsUtils.CurrentSettings.HotkeySettings.IncludeModifiers;
+            SelectedStartKey = HotkeySettings.defaultStartKeyMapping;
+            SelectedStopKey = HotkeySettings.defaultStopKeyMapping;
+            SelectedToggleKey = HotkeySettings.defaultToggleKeyMapping;
+            IncludeModifiers = HotkeySettings.defaultIncludeModifiers;
         }
 
         #endregion Commands

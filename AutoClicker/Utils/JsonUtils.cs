@@ -1,5 +1,4 @@
-﻿using System.IO;
-using System.Text.Json;
+﻿using AutoClicker.Core.Storage;
 using Serilog;
 
 namespace AutoClicker.Utils
@@ -8,41 +7,20 @@ namespace AutoClicker.Utils
     {
         public static T ReadJson<T>(string filePath)
         {
-            try
+            if (JsonFileStore.TryRead<T>(filePath, out T result))
             {
-                if (File.Exists(filePath))
-                {
-                    Log.Debug("Reading file = {FilePath}", filePath);
-                    string jsonString = File.ReadAllText(filePath);
-                    T result = JsonSerializer.Deserialize<T>(jsonString);
-                    Log.Debug("Read from file {FilePath} successfully", filePath);
-                    return result;
-                }
-                else
-                {
-                    Log.Warning("File {FilePath} is missing", filePath);
-                    return default;
-                }
+                Log.Debug("Read from file {FilePath} successfully", filePath);
+                return result;
             }
-            catch (JsonException)
-            {
-                Log.Error("Failed parsing object of type {Type}", typeof(T));
-                throw;
-            }
+
+            Log.Warning("File {FilePath} is missing, unreadable, or contains invalid JSON; defaults will be used", filePath);
+            return default;
         }
 
         public static void WriteJson<T>(string filePath, T data)
         {
-            JsonSerializerOptions options = new JsonSerializerOptions
-            {
-                WriteIndented = true
-            };
-            string jsonString = JsonSerializer.Serialize(data, options);
-            using (StreamWriter streamWriter = File.CreateText(filePath))
-            {
-                streamWriter.Write(jsonString);
-                Log.Debug("Write to file {FilePath} successfully", filePath);
-            }
+            JsonFileStore.WriteAtomic(filePath, data);
+            Log.Debug("Wrote file {FilePath} successfully", filePath);
         }
     }
 }

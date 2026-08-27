@@ -1,23 +1,26 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
-using System.Timers;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Threading.Tasks;
+using AutoClicker.Core;
+using AutoClicker.Core.Input;
+using AutoClicker.Core.Hotkeys;
 using AutoClicker.Enums;
 using AutoClicker.Models;
+using AutoClicker.Input;
 using AutoClicker.Utils;
 using Serilog;
 using CheckBox = System.Windows.Controls.CheckBox;
 using MouseAction = AutoClicker.Enums.MouseAction;
 using MouseButton = AutoClicker.Enums.MouseButton;
-using MouseCursor = System.Windows.Forms.Cursor;
 using NotifyIcon = System.Windows.Forms.NotifyIcon;
 using Point = System.Drawing.Point;
-using Timer = System.Timers.Timer;
 
 namespace AutoClicker.Views
 {
@@ -33,8 +36,11 @@ namespace AutoClicker.Views
            DependencyProperty.Register(nameof(AutoClickerSettings), typeof(AutoClickerSettings), typeof(MainWindow),
                new UIPropertyMetadata(SettingsUtils.CurrentSettings.AutoClickerSettings));
 
-        private int timesRepeated = 0;
-        private readonly Timer clickTimer;
+        private readonly ClickEngine clickEngine;
+        private bool shutdownPending;
+        private bool allowClose;
+        private IHotkeyRegistrationBackend hotkeyBackend;
+        private readonly Dictionary<Operation, HotkeyRegistrationSlot> registeredHotkeys = new Dictionary<Operation, HotkeyRegistrationSlot>();
         private readonly Uri runningIconUri =
             new Uri(Constants.RUNNING_ICON_RESOURCE_PATH, UriKind.Relative);
 
@@ -52,8 +58,10 @@ namespace AutoClicker.Views
 
         public MainWindow()
         {
-            clickTimer = new Timer();
-            clickTimer.Elapsed += OnClickTimerElapsed;
+            IMouseInput mouseInput = new MouseInputDispatcher(new WindowsMouseNativeApi());
+            clickEngine = new ClickEngine(mouseInput, new SystemDelayProvider());
+            clickEngine.Faulted += ClickEngine_Faulted;
+            clickEngine.Stopped += ClickEngine_Stopped;
 
             DataContext = this;
             ResetTitle();
@@ -69,37 +77,49 @@ namespace AutoClicker.Views
             _source.AddHook(StartStopHooks);
             _defaultIcon = Icon;
 
-            SettingsUtils.HotkeyChangedEvent += SettingsUtils_HotkeyChangedEvent;
-            SettingsUtils_HotkeyChangedEvent(this, new HotkeyChangedEventArgs()
-            {
-                Hotkey = SettingsUtils.CurrentSettings.HotkeySettings.StartHotkey,
-                Operation = Operation.Start
-            });
-            SettingsUtils_HotkeyChangedEvent(this, new HotkeyChangedEventArgs()
-            {
-                Hotkey = SettingsUtils.CurrentSettings.HotkeySettings.StopHotkey,
-                Operation = Operation.Stop
-            });
-            SettingsUtils_HotkeyChangedEvent(this, new HotkeyChangedEventArgs()
-            {
-                Hotkey = SettingsUtils.CurrentSettings.HotkeySettings.ToggleHotkey,
-                Operation = Operation.Toggle
-            });
+            hotkeyBackend = new WindowsHotkeyRegistrationBackend(_mainWindowHandle);
+            RegisterInitialHotkeys(SettingsUtils.CurrentSettings.HotkeySettings);
 
             RadioButtonSelectedLocationMode_CurrentLocation.Checked += RadioButtonSelectedLocationMode_CurrentLocationOnChecked;
 
             InitializeSystemTrayMenu();
         }
 
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (!allowClose && clickEngine.IsRunning)
+            {
+                e.Cancel = true;
+                if (!shutdownPending)
+                {
+                    shutdownPending = true;
+                    _ = StopBeforeCloseAsync();
+                }
+                return;
+            }
+
+            base.OnClosing(e);
+        }
+
+        private async Task StopBeforeCloseAsync()
+        {
+            await clickEngine.StopAsync();
+            allowClose = true;
+            await Dispatcher.InvokeAsync(Close);
+        }
+
         protected override void OnClosed(EventArgs e)
         {
             _source.RemoveHook(StartStopHooks);
 
-            SettingsUtils.HotkeyChangedEvent -= SettingsUtils_HotkeyChangedEvent;
+            clickEngine.Faulted -= ClickEngine_Faulted;
+            clickEngine.Stopped -= ClickEngine_Stopped;
 
-            foreach (int hotkeyId in Constants.ALL_HOTKEY_IDS)
+            if (hotkeyBackend != null)
             {
-                DeregisterHotkey(hotkeyId);
+                foreach (HotkeyRegistrationSlot slot in registeredHotkeys.Values)
+                    HotkeyRegistrationTransaction.UnregisterSlot(hotkeyBackend, slot);
+                registeredHotkeys.Clear();
             }
 
             RadioButtonSelectedLocationMode_CurrentLocation.Checked -= RadioButtonSelectedLocationMode_CurrentLocationOnChecked;
@@ -117,21 +137,9 @@ namespace AutoClicker.Views
 
         #region Commands
 
-        private void StartCommand_Execute(object sender, ExecutedRoutedEventArgs e)
+        private async void StartCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
-            int interval = CalculateInterval();
-            clickTimer.Interval = interval;
-
-            Log.Information("Starting operation, interval={Interval}ms", interval);
-            InitMouseClick();
-            timesRepeated = 1;
-            clickTimer.Start();
-
-            Icon = new BitmapImage(runningIconUri);
-            Title += Constants.MAIN_WINDOW_TITLE_RUNNING;
-            systemTrayIcon.Text += Constants.MAIN_WINDOW_TITLE_RUNNING;
-
-            CommandManager.InvalidateRequerySuggested();
+            await StartClickingAsync();
         }
 
         private void StartCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
@@ -139,33 +147,24 @@ namespace AutoClicker.Views
             e.CanExecute = CanStartOperation();
         }
 
-        private void StopCommand_Execute(object sender, ExecutedRoutedEventArgs e)
+        private async void StopCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
-            Log.Information("Stopping operation");
-            clickTimer.Stop();
-
-            ResetTitle();
-            Icon = _defaultIcon;
-
-            CommandManager.InvalidateRequerySuggested();
+            await StopClickingAsync();
         }
 
         private void StopCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = clickTimer.Enabled;
+            e.CanExecute = clickEngine.IsRunning;
         }
 
-        private void ToggleCommand_Execute(object sender, ExecutedRoutedEventArgs e)
+        private async void ToggleCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
-            if (clickTimer.Enabled)
-                StopCommand_Execute(sender, e);
-            else
-                StartCommand_Execute(sender, e);
+            await ToggleClickingAsync();
         }
 
         private void ToggleCommand_CanExecute(object sender, CanExecuteRoutedEventArgs e)
         {
-            e.CanExecute = CanStartOperation() | clickTimer.Enabled;
+            e.CanExecute = clickEngine.IsRunning || CanStartOperation();
         }
 
         private void SaveSettingsCommand_Execute(object sender, ExecutedRoutedEventArgs e)
@@ -176,9 +175,16 @@ namespace AutoClicker.Views
 
         private void HotkeySettingsCommand_Execute(object sender, ExecutedRoutedEventArgs e)
         {
+            if (clickEngine.IsRunning)
+            {
+                MessageBox.Show(this, "Stop clicking before changing global hotkeys.", "Hotkeys in use",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             if (settingsWindow == null)
             {
-                settingsWindow = new SettingsWindow();
+                settingsWindow = new SettingsWindow { Owner = this };
                 settingsWindow.Closed += (o, args) => settingsWindow = null;
             }
 
@@ -192,7 +198,7 @@ namespace AutoClicker.Views
 
         private void Exit()
         {
-            Application.Current.Shutdown();
+            Close();
         }
 
         private void AboutCommand_Execute(object sender, ExecutedRoutedEventArgs e)
@@ -233,55 +239,114 @@ namespace AutoClicker.Views
 
         #region Helper Methods
 
-        private int CalculateInterval()
+        private ClickRunOptions CreateRunOptions()
         {
-            return AutoClickerSettings.Milliseconds
-                + (AutoClickerSettings.Seconds * 1000)
-                + (AutoClickerSettings.Minutes * 60 * 1000)
-                + (AutoClickerSettings.Hours * 60 * 60 * 1000);
-        }
+            int interval = ClickIntervalCalculator.ToMilliseconds(
+                AutoClickerSettings.Hours,
+                AutoClickerSettings.Minutes,
+                AutoClickerSettings.Seconds,
+                AutoClickerSettings.Milliseconds);
 
-        private bool IsIntervalValid()
-        {
-            return CalculateInterval() > 0;
+            int? repeatCount = AutoClickerSettings.SelectedRepeatMode switch
+            {
+                RepeatMode.Infinite => null,
+                RepeatMode.Count => AutoClickerSettings.SelectedTimesToRepeat,
+                _ => throw new ArgumentOutOfRangeException(nameof(AutoClickerSettings.SelectedRepeatMode))
+            };
+
+            return ClickRunOptions.Create(
+                interval,
+                AutoClickerSettings.VarianceMilliseconds,
+                GetSelectedCoreButton(AutoClickerSettings.SelectedMouseButton),
+                GetSelectedCoreAction(AutoClickerSettings.SelectedMouseAction),
+                repeatCount,
+                GetFixedPosition());
         }
 
         private bool CanStartOperation()
         {
-            return !clickTimer.Enabled && IsRepeatModeValid() && IsIntervalValid();
+            if (clickEngine.IsRunning)
+                return false;
+
+            try
+            {
+                _ = CreateRunOptions();
+                return true;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return false;
+            }
         }
 
-        private int GetTimesToRepeat()
+        private async Task StartClickingAsync()
         {
-            return AutoClickerSettings.SelectedRepeatMode == RepeatMode.Count ? AutoClickerSettings.SelectedTimesToRepeat : -1;
+            try
+            {
+                ClickRunOptions options = CreateRunOptions();
+                bool started = await clickEngine.StartAsync(options);
+                if (!started)
+                    return;
+
+                Log.Information("Starting operation, interval={Interval}ms, variance={Variance}ms",
+                    options.IntervalMilliseconds, options.VarianceMilliseconds);
+                Icon = new BitmapImage(runningIconUri);
+                Title = Constants.MAIN_WINDOW_TITLE_DEFAULT + Constants.MAIN_WINDOW_TITLE_RUNNING;
+                systemTrayIcon.Text = Constants.MAIN_WINDOW_TITLE_DEFAULT + Constants.MAIN_WINDOW_TITLE_RUNNING;
+                CommandManager.InvalidateRequerySuggested();
+            }
+            catch (ArgumentOutOfRangeException ex)
+            {
+                Log.Warning(ex, "Invalid click settings");
+                MessageBox.Show(this, ex.Message, "Invalid click settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                CommandManager.InvalidateRequerySuggested();
+            }
         }
 
-        private Point GetSelectedPosition()
+        private async Task StopClickingAsync()
         {
-            return AutoClickerSettings.SelectedLocationMode == LocationMode.CurrentLocation ?
-                MouseCursor.Position : new Point(AutoClickerSettings.PickedXValue, AutoClickerSettings.PickedYValue);
+            if (!clickEngine.IsRunning)
+                return;
+
+            Log.Information("Stopping operation");
+            await clickEngine.StopAsync();
         }
 
-        private int GetSelectedXPosition()
+        private Task ToggleClickingAsync()
         {
-            return GetSelectedPosition().X;
+            return clickEngine.IsRunning ? StopClickingAsync() : StartClickingAsync();
         }
 
-        private int GetSelectedYPosition()
+        private Point? GetFixedPosition()
         {
-            return GetSelectedPosition().Y;
+            return AutoClickerSettings.SelectedLocationMode == LocationMode.PickedLocation
+                ? new Point(AutoClickerSettings.PickedXValue, AutoClickerSettings.PickedYValue)
+                : null;
         }
 
-        private int GetNumberOfMouseActions()
+        private static ClickButton GetSelectedCoreButton(MouseButton button)
         {
-            return AutoClickerSettings.SelectedMouseAction == MouseAction.Single ? 1 : 2;
+            return button switch
+            {
+                MouseButton.Left => ClickButton.Left,
+                MouseButton.Right => ClickButton.Right,
+                MouseButton.Middle => ClickButton.Middle,
+                MouseButton.X1 => ClickButton.X1,
+                MouseButton.X2 => ClickButton.X2,
+                _ => throw new ArgumentOutOfRangeException(nameof(button))
+            };
         }
 
-        private bool IsRepeatModeValid()
+        private static ClickAction GetSelectedCoreAction(MouseAction action)
         {
-            return AutoClickerSettings.SelectedRepeatMode == RepeatMode.Infinite
-                || (AutoClickerSettings.SelectedRepeatMode == RepeatMode.Count && AutoClickerSettings.SelectedTimesToRepeat > 0);
+            return action switch
+            {
+                MouseAction.Single => ClickAction.Single,
+                MouseAction.Double => ClickAction.Double,
+                _ => throw new ArgumentOutOfRangeException(nameof(action))
+            };
         }
+
 
         private void ResetTitle()
         {
@@ -315,89 +380,148 @@ namespace AutoClicker.Views
             systemTrayMenu.Dispose();
         }
 
-        private void ReRegisterHotkey(IEnumerable<int> hotkeyIds, KeyMapping hotkey, bool includeModifiers)
+        private HotkeyRegistrationSlot BuildHotkeySlot(Operation operation, KeyMapping hotkey, bool includeModifiers)
         {
-            foreach (int hotkeyId in hotkeyIds)
+            IEnumerable<int> ids = operation switch
             {
-                DeregisterHotkey(hotkeyId);
-            }
-            RegisterHotkey(hotkeyIds, hotkey, includeModifiers);
+                Operation.Start => Constants.START_HOTKEY_IDS,
+                Operation.Stop => Constants.STOP_HOTKEY_IDS,
+                Operation.Toggle => Constants.TOGGLE_HOTKEY_IDS,
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
+
+            return new HotkeyRegistrationSlot(
+                operation.ToString(),
+                ids.ToArray(),
+                new HotkeyRegistrationBinding(hotkey.VirtualKeyCode, includeModifiers));
         }
 
-        private void RegisterHotkey(IEnumerable<int> hotkeyIds, KeyMapping hotkey, bool includeModifiers)
+        private void RegisterInitialHotkeys(HotkeySettings settings)
         {
-            Log.Information("RegisterHotkey with hotkey={Hotkey}, includeModifiers={IncludeModifiers}", hotkey.DisplayName, includeModifiers);
-            IEnumerable<(int, int)> hotkeyIdsToModifiers = Enumerable.Zip(hotkeyIds, Constants.MODIFIERS, (first, second) => ValueTuple.Create(first, second));
-            if (includeModifiers)
+            IReadOnlyList<HotkeyConflict> conflicts = HotkeyBindingValidator.Validate(
+                new HotkeyBinding("Start", settings.StartHotkey.VirtualKeyCode),
+                new HotkeyBinding("Stop", settings.StopHotkey.VirtualKeyCode),
+                new HotkeyBinding("Toggle", settings.ToggleHotkey.VirtualKeyCode));
+            if (conflicts.Count > 0)
             {
-                foreach ((int, int) item in hotkeyIdsToModifiers)
+                Log.Warning("Saved hotkeys contain conflicts; restoring safe defaults");
+                settings = new HotkeySettings
                 {
-                    Win32ApiUtils.RegisterHotkey(_mainWindowHandle, item.Item1, item.Item2, hotkey.VirtualKeyCode);
-                }
+                    StartHotkey = HotkeySettings.defaultStartKeyMapping,
+                    StopHotkey = HotkeySettings.defaultStopKeyMapping,
+                    ToggleHotkey = HotkeySettings.defaultToggleKeyMapping,
+                    IncludeModifiers = HotkeySettings.defaultIncludeModifiers
+                };
+                SettingsUtils.SetHotkeySettings(settings);
+                MessageBox.Show(this, "Saved global hotkeys conflicted, so AutoClicker restored the safe F6 / F7 / F8 defaults.",
+                    "Hotkeys restored", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
-            else
-            {
-                Win32ApiUtils.RegisterHotkey(_mainWindowHandle, hotkeyIdsToModifiers.ElementAt(0).Item1, hotkeyIdsToModifiers.ElementAt(0).Item2, hotkey.VirtualKeyCode);
-            }
+
+            TryRegisterInitialHotkey(Operation.Start, settings.StartHotkey, settings.IncludeModifiers);
+            TryRegisterInitialHotkey(Operation.Stop, settings.StopHotkey, settings.IncludeModifiers);
+            TryRegisterInitialHotkey(Operation.Toggle, settings.ToggleHotkey, settings.IncludeModifiers);
+            UpdateHotkeyButtonLabels(settings);
         }
 
-        private void DeregisterHotkey(int hotkeyId)
+        private void TryRegisterInitialHotkey(Operation operation, KeyMapping hotkey, bool includeModifiers)
         {
-            Log.Information("DeregisterHotkey with hotkeyId={HotkeyId}", hotkeyId);
-            if (Win32ApiUtils.DeregisterHotkey(_mainWindowHandle, hotkeyId))
+            HotkeyRegistrationSlot slot = BuildHotkeySlot(operation, hotkey, includeModifiers);
+            HotkeyRegistrationResult result = HotkeyRegistrationTransaction.TryRegisterSlot(hotkeyBackend, slot, Constants.MODIFIERS);
+            if (result.Success)
+            {
+                registeredHotkeys[operation] = slot;
                 return;
-            Log.Debug("No hotkey registered on {HotkeyId}", hotkeyId);
+            }
+
+            Log.Warning("Could not register {Operation} hotkey {Hotkey}; Win32 error {Error}", operation, hotkey.DisplayName, result.NativeError);
+            MessageBox.Show(this, $"The {operation} hotkey ({hotkey.DisplayName}) could not be registered. Windows error: {result.NativeError}.",
+                "Hotkey unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        internal bool TryApplyHotkeySettings(HotkeySettings proposed, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            if (clickEngine.IsRunning)
+            {
+                errorMessage = "Stop clicking before changing global hotkeys.";
+                return false;
+            }
+
+            IReadOnlyList<HotkeyConflict> conflicts = HotkeyBindingValidator.Validate(
+                new HotkeyBinding("Start", proposed.StartHotkey.VirtualKeyCode),
+                new HotkeyBinding("Stop", proposed.StopHotkey.VirtualKeyCode),
+                new HotkeyBinding("Toggle", proposed.ToggleHotkey.VirtualKeyCode));
+            if (conflicts.Count > 0)
+            {
+                HotkeyConflict conflict = conflicts[0];
+                errorMessage = $"{conflict.FirstOperation} and {conflict.SecondOperation} cannot use the same global hotkey.";
+                return false;
+            }
+
+            HotkeyRegistrationSlot[] desired =
+            {
+                BuildHotkeySlot(Operation.Start, proposed.StartHotkey, proposed.IncludeModifiers),
+                BuildHotkeySlot(Operation.Stop, proposed.StopHotkey, proposed.IncludeModifiers),
+                BuildHotkeySlot(Operation.Toggle, proposed.ToggleHotkey, proposed.IncludeModifiers)
+            };
+            HotkeyRegistrationSlot[] current = registeredHotkeys.Values.ToArray();
+            HotkeyRegistrationResult result = HotkeyRegistrationTransaction.ReplaceAll(hotkeyBackend, current, desired, Constants.MODIFIERS);
+            if (!result.Success)
+            {
+                errorMessage = $"Windows refused the {result.FailedOperation} hotkey (error {result.NativeError}).";
+                if (!result.RollbackSucceeded)
+                {
+                    foreach (int id in Constants.ALL_HOTKEY_IDS)
+                        hotkeyBackend.Unregister(id);
+                    registeredHotkeys.Clear();
+
+                    HotkeyRegistrationSlot emergencyStop = current.FirstOrDefault(x => x.Operation == Operation.Stop.ToString());
+                    if (emergencyStop != null)
+                    {
+                        HotkeyRegistrationResult stopRecovery = HotkeyRegistrationTransaction.TryRegisterSlot(hotkeyBackend, emergencyStop, Constants.MODIFIERS);
+                        if (stopRecovery.Success)
+                            registeredHotkeys[Operation.Stop] = emergencyStop;
+                        else
+                            errorMessage += " The previous Stop hotkey could not be restored; close AutoClicker and reopen it before starting a new run.";
+                    }
+                }
+                return false;
+            }
+
+            registeredHotkeys.Clear();
+            registeredHotkeys[Operation.Start] = desired[0];
+            registeredHotkeys[Operation.Stop] = desired[1];
+            registeredHotkeys[Operation.Toggle] = desired[2];
+            UpdateHotkeyButtonLabels(proposed);
+            return true;
+        }
+
+        private void UpdateHotkeyButtonLabels(HotkeySettings settings)
+        {
+            startButton.Content = $"{Constants.MAIN_WINDOW_START_BUTTON_CONTENT} ({settings.StartHotkey.DisplayName})";
+            stopButton.Content = $"{Constants.MAIN_WINDOW_STOP_BUTTON_CONTENT} ({settings.StopHotkey.DisplayName})";
+            toggleButton.Content = $"{Constants.MAIN_WINDOW_TOGGLE_BUTTON_CONTENT} ({settings.ToggleHotkey.DisplayName})";
         }
 
         #endregion Helper Methods
 
         #region Event Handlers
 
-        private void OnClickTimerElapsed(object sender, ElapsedEventArgs e)
+        private void ClickEngine_Faulted(object sender, Exception error)
         {
-            Dispatcher.Invoke(() =>
-            {
-                InitMouseClick();
-                timesRepeated++;
-
-                if (timesRepeated == GetTimesToRepeat())
-                {
-                    clickTimer.Stop();
-                    ResetTitle();
-                }
-            });
+            Log.Error(error, "Click engine stopped after an input failure");
+            _ = Dispatcher.InvokeAsync(() =>
+                MessageBox.Show(this, error.Message, "AutoClicker stopped", MessageBoxButton.OK, MessageBoxImage.Error));
         }
 
-        private void InitMouseClick()
+        private void ClickEngine_Stopped(object sender, EventArgs e)
         {
-            Dispatcher.Invoke(() =>
+            _ = Dispatcher.InvokeAsync(() =>
             {
-                switch (AutoClickerSettings.SelectedMouseButton)
-                {
-                    case MouseButton.Left:
-                        PerformMouseClick(Constants.MOUSEEVENTF_LEFTDOWN, Constants.MOUSEEVENTF_LEFTUP, GetSelectedXPosition(), GetSelectedYPosition());
-                        break;
-                    case MouseButton.Right:
-                        PerformMouseClick(Constants.MOUSEEVENTF_RIGHTDOWN, Constants.MOUSEEVENTF_RIGHTUP, GetSelectedXPosition(), GetSelectedYPosition());
-                        break;
-                    case MouseButton.Middle:
-                        PerformMouseClick(Constants.MOUSEEVENTF_MIDDLEDOWN, Constants.MOUSEEVENTF_MIDDLEUP, GetSelectedXPosition(), GetSelectedYPosition());
-                        break;
-                }
+                ResetTitle();
+                Icon = _defaultIcon;
+                CommandManager.InvalidateRequerySuggested();
             });
-        }
-
-        private void PerformMouseClick(int mouseDownAction, int mouseUpAction, int xPos, int yPos)
-        {
-            for (int i = 0; i < GetNumberOfMouseActions(); ++i)
-            {
-                if (!Win32ApiUtils.SetCursorPosition(xPos, yPos))
-                {
-                    Log.Error("Failed to set the mouse cursor!");
-                }
-
-                Win32ApiUtils.ExecuteMouseEvent(mouseDownAction | mouseUpAction, xPos, yPos, 0, 0);
-            }
         }
 
         private nint StartStopHooks(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
@@ -407,43 +531,21 @@ namespace AutoClicker.Views
                 int virtualKey = ((int)lParam >> 16) & 0xFFFF;
                 if (virtualKey == SettingsUtils.CurrentSettings.HotkeySettings.StartHotkey.VirtualKeyCode && CanStartOperation())
                 {
-                    StartCommand_Execute(null, null);
+                    _ = StartClickingAsync();
                 }
-                if (virtualKey == SettingsUtils.CurrentSettings.HotkeySettings.StopHotkey.VirtualKeyCode && clickTimer.Enabled)
+                if (virtualKey == SettingsUtils.CurrentSettings.HotkeySettings.StopHotkey.VirtualKeyCode && clickEngine.IsRunning)
                 {
-                    StopCommand_Execute(null, null);
+                    _ = StopClickingAsync();
                 }
-                if (virtualKey == SettingsUtils.CurrentSettings.HotkeySettings.ToggleHotkey.VirtualKeyCode && CanStartOperation() | clickTimer.Enabled)
+                if (virtualKey == SettingsUtils.CurrentSettings.HotkeySettings.ToggleHotkey.VirtualKeyCode && (CanStartOperation() || clickEngine.IsRunning))
                 {
-                    ToggleCommand_Execute(null, null);
+                    _ = ToggleClickingAsync();
                 }
                 handled = true;
             }
             return nint.Zero;
         }
 
-        private void SettingsUtils_HotkeyChangedEvent(object sender, HotkeyChangedEventArgs e)
-        {
-            Log.Information("HotkeyChangedEvent with operation={Operation}, hotkey={Hotkey}, includeModifiers={IncludeModifiers}", e.Operation, e.Hotkey.DisplayName, e.IncludeModifiers);
-            switch (e.Operation)
-            {
-                case Operation.Start:
-                    ReRegisterHotkey(Constants.START_HOTKEY_IDS, e.Hotkey, e.IncludeModifiers);
-                    startButton.Content = $"{Constants.MAIN_WINDOW_START_BUTTON_CONTENT} ({e.Hotkey.DisplayName})";
-                    break;
-                case Operation.Stop:
-                    ReRegisterHotkey(Constants.STOP_HOTKEY_IDS, e.Hotkey, e.IncludeModifiers);
-                    stopButton.Content = $"{Constants.MAIN_WINDOW_STOP_BUTTON_CONTENT} ({e.Hotkey.DisplayName})";
-                    break;
-                case Operation.Toggle:
-                    ReRegisterHotkey(Constants.TOGGLE_HOTKEY_IDS, e.Hotkey, e.IncludeModifiers);
-                    toggleButton.Content = $"{Constants.MAIN_WINDOW_TOGGLE_BUTTON_CONTENT} ({e.Hotkey.DisplayName})";
-                    break;
-                default:
-                    Log.Warning("Operation {Operation} not supported!", e.Operation);
-                    throw new NotSupportedException($"Operation {e.Operation} not supported!");
-            }
-        }
 
         private void SystemTrayIcon_Click(object sender, EventArgs e)
         {
